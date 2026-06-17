@@ -253,14 +253,12 @@ func getHttpLogs(ctx context.Context, g *railway.GraphQLClient, initialDeploymen
 			for i := range logs.Payload.Data.HTTPLogs {
 				logTimestamp, err := getTimeStampAttributeFromHttpLog(logs.Payload.Data.HTTPLogs[i])
 				if err != nil {
-					logger.Stdout.Error("failed to get timestamp from http log",
+					logger.Stdout.Error("failed to get timestamp from http log, skipping log",
 						slog.String("deployment_id", initialDeployment.ID.String()),
 						logger.ErrAttr(err),
 					)
 
-					// we return an error here because this isn't something we can recover from
-					// returning here will cause the goroutine to exit and the parent SubscribeToHttpLogs function to return the error
-					return fmt.Errorf("failed to get timestamp from http log: %w", err)
+					continue
 				}
 
 				if !logTimestamp.After(logTimes) || logTimestamp.Before(initTime) {
