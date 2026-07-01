@@ -1,18 +1,15 @@
 module github.com/brody192/locomotive
 
-go 1.25
-
-toolchain go1.25.0
+go 1.26.1
 
 require (
 	github.com/Code-Hex/go-generics-cache v1.5.1
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de
-	github.com/caarlos0/env/v11 v11.3.1
-	github.com/coder/websocket v1.8.13
+	github.com/caarlos0/env/v11 v11.4.0
+	github.com/coder/websocket v1.8.14
 	github.com/flexstack/uuid v1.1.0
-	github.com/hasura/go-graphql-client v0.14.4
+	github.com/hasura/go-graphql-client v0.15.1
 	github.com/joho/godotenv v1.5.1
-	github.com/sethvargo/go-retry v0.3.0
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
 	go.opentelemetry.io/otel v1.40.0
@@ -30,13 +27,13 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.7 // indirect
-	github.com/tidwall/match v1.1.1 // indirect
+	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/metric v1.40.0 // indirect
 	go.opentelemetry.io/otel/trace v1.40.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
-	golang.org/x/exp v0.0.0-20250718183923-645b1fa84792 // indirect
+	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect

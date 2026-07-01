@@ -17,9 +17,7 @@
 package sentry_attribute
 
 import (
-	"encoding/json"
-	"fmt"
-	"strconv"
+	"github.com/tidwall/sjson"
 )
 
 // Type describes the type of the data Value holds.
@@ -77,92 +75,29 @@ func StringValue(v string) Value {
 	}
 }
 
-// Type returns a type of the Value.
-func (v Value) Type() Type {
-	return v.vtype
-}
+func (v Value) asBool() bool       { return rawToBool(v.numeric) }
+func (v Value) asInt64() int64     { return rawToInt64(v.numeric) }
+func (v Value) asFloat64() float64 { return rawToFloat64(v.numeric) }
 
-// AsBool returns the bool value. Make sure that the Value's type is
-// BOOL.
-func (v Value) AsBool() bool {
-	return rawToBool(v.numeric)
-}
+const baseValueJSON = `{"value":"","type":""}`
 
-// AsInt64 returns the int64 value. Make sure that the Value's type is
-// INT64.
-func (v Value) AsInt64() int64 {
-	return rawToInt64(v.numeric)
-}
-
-// AsFloat64 returns the float64 value. Make sure that the Value's
-// type is FLOAT64.
-func (v Value) AsFloat64() float64 {
-	return rawToFloat64(v.numeric)
-}
-
-// AsString returns the string value. Make sure that the Value's type
-// is STRING.
-func (v Value) AsString() string {
-	return v.stringly
-}
-
-type unknownValueType struct{}
-
-// AsInterface returns Value's data as interface{}.
-func (v Value) AsInterface() interface{} {
-	switch v.Type() {
+// RawJSON returns the Sentry attribute JSON encoding of the Value as raw bytes, built
+// from the base template using sjson.
+func (v Value) RawJSON() []byte {
+	buf := []byte(baseValueJSON)
+	switch v.vtype {
 	case BOOL:
-		return v.AsBool()
+		buf, _ = sjson.SetBytes(buf, "value", v.asBool())
+		buf, _ = sjson.SetBytes(buf, "type", "boolean")
 	case INT64:
-		return v.AsInt64()
+		buf, _ = sjson.SetBytes(buf, "value", v.asInt64())
+		buf, _ = sjson.SetBytes(buf, "type", "integer")
 	case FLOAT64:
-		return v.AsFloat64()
+		buf, _ = sjson.SetBytes(buf, "value", v.asFloat64())
+		buf, _ = sjson.SetBytes(buf, "type", "double")
 	case STRING:
-		return v.stringly
+		buf, _ = sjson.SetBytes(buf, "value", v.stringly)
+		buf, _ = sjson.SetBytes(buf, "type", "string")
 	}
-	return unknownValueType{}
-}
-
-// String returns a string representation of Value's data.
-func (v Value) String() string {
-	switch v.Type() {
-	case BOOL:
-		return strconv.FormatBool(v.AsBool())
-	case INT64:
-		return strconv.FormatInt(v.AsInt64(), 10)
-	case FLOAT64:
-		return fmt.Sprint(v.AsFloat64())
-	case STRING:
-		return v.stringly
-	default:
-		return "unknown"
-	}
-}
-
-// MarshalJSON returns the JSON encoding of the Value.
-func (v Value) MarshalJSON() ([]byte, error) {
-	var jsonVal struct {
-		Value interface{} `json:"value"`
-		Type  string      `json:"type"`
-	}
-
-	jsonVal.Value = v.AsInterface()
-	jsonVal.Type = v.Type().String()
-
-	return json.Marshal(jsonVal)
-}
-
-func (t Type) String() string {
-	switch t {
-	case BOOL:
-		return "boolean"
-	case INT64:
-		return "integer"
-	case FLOAT64:
-		return "double"
-	case STRING:
-		return "string"
-	}
-
-	return "invalid"
+	return buf
 }

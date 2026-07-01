@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+
+jobs:
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      skip: ${{ steps.pr.outputs.skip }}
+      tag: ${{ steps.version.outputs.tag }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      pr_title: ${{ steps.pr.outputs.pr_title }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve merged PR
+        id: pr
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'closed',
+              sort: 'updated',
+              direction: 'desc',
+              per_page: 5,
+            });
+
+            const merged = prs.find(pr => pr.merge_commit_sha === context.sha);
+            if (!merged) {
+              core.info('No merged PR found for this push, skipping release');
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            const labels = merged.labels.map(l => l.name);
+
+            if (labels.includes('release/skip')) {
+              core.info('release/skip label found, skipping release');
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            let bump = '';
+            if (labels.includes('release/major')) bump = 'major';
+            else if (labels.includes('release/minor')) bump = 'minor';
+            else if (labels.includes('release/patch')) bump = 'patch';
+
+            if (!bump) {
+              core.info('No release label on merged PR, skipping release');
+              core.setOutput('skip', 'true');
+              return;
+            }
+
+            core.setOutput('skip', 'false');
+            core.setOutput('bump', bump);
+            core.setOutput('pr_number', merged.number.toString());
+            core.setOutput('pr_title', merged.title);
+
+      - name: Compute next version
+        if: steps.pr.outputs.skip != 'true'
+        id: version
+        run: |
+          LATEST=$(git tag -l | sed 's/^v//' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n1)
+          LATEST=${LATEST:-0.0.0}
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$LATEST"
+
+          case "${{ steps.pr.outputs.bump }}" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          echo "tag=${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+          echo "Bumping ${LATEST} → ${MAJOR}.${MINOR}.${PATCH} (${{ steps.pr.outputs.bump }})"
+
+      - name: Push tag
+        if: steps.pr.outputs.skip != 'true'
+        run: |
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
+
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      push: true
+      image: ghcr.io/${{ github.repository }}
+    permissions:
+      packages: write
+    secrets: inherit
+
+  manifest:
+    name: Push Manifest
+    needs: [prepare, build]
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v8
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log into ghcr.io
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }} \
+            -t ghcr.io/${{ github.repository }}:latest \
+            $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
+
+  release:
+    name: Create Release
+    needs: [prepare, manifest]
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub release
+        uses: actions/github-script@v9
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+          PR_TITLE: ${{ needs.prepare.outputs.pr_title }}
+        with:
+          script: |
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: process.env.TAG,
+              name: process.env.TAG,
+              body: `PR #${process.env.PR_NUMBER}: ${process.env.PR_TITLE}`,
+              generate_release_notes: true,
+            });

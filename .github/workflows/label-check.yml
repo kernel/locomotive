@@ -1,0 +1,43 @@
+name: Release Label
+
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize, reopened]
+    branches: [main]
+
+concurrency:
+  group: label-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check Release Label
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify release label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          MAJOR=$(echo "$LABELS" | jq '[.[] | select(. == "release/major")] | length')
+          MINOR=$(echo "$LABELS" | jq '[.[] | select(. == "release/minor")] | length')
+          PATCH=$(echo "$LABELS" | jq '[.[] | select(. == "release/patch")] | length')
+          SKIP=$(echo "$LABELS" | jq '[.[] | select(. == "release/skip")] | length')
+
+          TOTAL=$((MAJOR + MINOR + PATCH + SKIP))
+
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "::error::Add a release label to this PR: release/major, release/minor, release/patch, or release/skip"
+            exit 1
+          fi
+
+          if [ "$TOTAL" -gt 1 ]; then
+            echo "::error::Only one release label is allowed per PR"
+            exit 1
+          fi
+
+          if [ "$MAJOR" -eq 1 ]; then TYPE="major"; fi
+          if [ "$MINOR" -eq 1 ]; then TYPE="minor"; fi
+          if [ "$PATCH" -eq 1 ]; then TYPE="patch"; fi
+          if [ "$SKIP" -eq 1 ]; then TYPE="skip"; fi
+
+          echo "Release type: ${TYPE}"

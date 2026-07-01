@@ -16,3 +16,7 @@ type DeploymentHttpLogWithMetadata struct {
 
 	Metadata DeploymentHttpLogMetadata
 }
+
+func (d DeploymentHttpLogWithMetadata) GetMetadata() map[string]string {
+	return d.Metadata
+}

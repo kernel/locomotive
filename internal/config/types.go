@@ -19,7 +19,9 @@ type WebhookConfig struct {
 	ExpectedHostContains []string
 	ExpectedHeaders      []string
 
-	Headers AdditionalHeaders
+	// DefaultHeaders are headers this mode forces on every request (e.g. Content-Type).
+	// Distinct from the user-supplied AdditionalHeaders.
+	DefaultHeaders map[string]string
 
 	EnvironmentLogReconstructorFunc func([]environment_logs.EnvironmentLogWithMetadata) ([]byte, error)
 	HTTPLogReconstructorFunc        func([]http_logs.DeploymentHttpLogWithMetadata) ([]byte, error)
@@ -40,7 +42,9 @@ type config struct {
 	EnableDeployLogs bool `env:"ENABLE_DEPLOY_LOGS" envDefault:"true"`
 }
 
-// OtelConfig holds OTEL-specific configuration (uses OTEL_ prefix, not LOCOMOTIVE_).
+// OtelConfig selects OTLP gRPC export instead of the webhook path. Its env vars use the
+// conventional OTEL_ names (no LOCOMOTIVE_ prefix). When Enabled, logs are emitted to the
+// OTLP endpoint under ServiceName rather than serialized and POSTed to WebhookUrl.
 type OtelConfig struct {
 	Enabled         bool   `env:"OTEL_ENABLED" envDefault:"false"`
 	Endpoint        string `env:"OTEL_EXPORTER_OTLP_ENDPOINT"`

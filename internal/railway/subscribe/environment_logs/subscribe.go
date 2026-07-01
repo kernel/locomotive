@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -12,61 +11,24 @@ import (
 	"github.com/brody192/locomotive/internal/railway"
 	"github.com/brody192/locomotive/internal/railway/gql/subscriptions"
 	"github.com/brody192/locomotive/internal/railway/subscribe"
-	"github.com/coder/websocket"
 	"github.com/flexstack/uuid"
 )
 
-func createEnvironmentLogSubscription(ctx context.Context, client *railway.GraphQLClient, environmentId uuid.UUID, serviceIds []uuid.UUID) (*websocket.Conn, error) {
-	payload := &subscriptions.EnvironmentLogsSubscriptionPayload{
+// environmentLogsPayload builds the subscription payload. beforeDate is the exclusive
+// lower time bound: the backend streams logs with timestamp > beforeDate. We pass our
+// cursor (connect time, then the last-seen log timestamp) so the backend only returns
+// what's new, instead of re-scanning (and re-sending) a backlog window every time.
+func environmentLogsPayload(environmentId uuid.UUID, serviceIds []uuid.UUID, beforeDate time.Time) *subscriptions.EnvironmentLogsSubscriptionPayload {
+	return &subscriptions.EnvironmentLogsSubscriptionPayload{
 		Query: subscriptions.EnvironmentLogsSubscription,
 		Variables: &subscriptions.EnvironmentLogsSubscriptionVariables{
 			EnvironmentId: environmentId,
 			Filter:        buildServiceFilter(serviceIds),
 
-			// needed for seamless subscription resuming
-			BeforeDate:  time.Now().UTC().Add(-5 * time.Minute).Format(time.RFC3339Nano),
-			BeforeLimit: 500,
+			BeforeDate: beforeDate.UTC().Format(time.RFC3339Nano),
+			// Request a large batch so we keep up with high-throughput environments.
+			BeforeLimit: 5000,
 		},
-	}
-
-	return client.CreateWebSocketSubscription(ctx, payload)
-}
-
-// resubscribeWithRetry handles reconnection logic with retries and proper context cancellation
-func resubscribeServiceLogsWithRetry(ctx context.Context, client *railway.GraphQLClient, environmentId uuid.UUID, serviceIds []uuid.UUID, conn *websocket.Conn) (*websocket.Conn, error) {
-	subscribe.SafeConnCloseNow(conn)
-
-	// Track total retry time with a maximum of 3600 seconds (1 hour)
-	maxRetryDuration := 3600 * time.Second
-	retryStart := time.Now()
-
-	// Try to resubscribe with retry loop
-	for {
-		// Check if we've exceeded the maximum retry duration
-		if time.Since(retryStart) > maxRetryDuration {
-			return nil, fmt.Errorf("failed to resubscribe after %v: maximum retry duration exceeded", maxRetryDuration)
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-			newConn, err := createEnvironmentLogSubscription(ctx, client, environmentId, serviceIds)
-			if err != nil {
-				logger.Stdout.Debug("error resubscribing, will retry in 1 second", logger.ErrAttr(err))
-
-				// Sleep with context cancellation awareness
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(1 * time.Second):
-					continue
-				}
-			}
-
-			// Successfully resubscribed
-			return newConn, nil
-		}
 	}
 }
 
@@ -76,49 +38,26 @@ func SubscribeToServiceLogs(ctx context.Context, g *railway.GraphQLClient, logTr
 		return fmt.Errorf("error getting metadata map: %w", err)
 	}
 
-	conn, err := createEnvironmentLogSubscription(ctx, g, environmentId, serviceIds)
-	if err != nil {
-		return err
-	}
-
-	defer conn.CloseNow()
-
+	// LogTime is our cursor into the log stream: it starts at connect time (we only
+	// forward logs from startup onward) and advances to the last log we forward, so the
+	// payload provider always asks for logs after what we've already seen — on the first
+	// connect and every resubscribe alike.
 	LogTime := time.Now().UTC()
 
-	for {
-		_, logPayload, err := subscribe.SafeConnRead(conn, ctx)
-		if err != nil {
-			logger.Stdout.Debug("resubscribing",
-				slog.String("from", "SubscribeToEnvironmentLogs"),
-				logger.ErrAttr(err),
-			)
+	sub := subscribe.NewSubscription(subscribe.LogTypeEnvironment, g.CreateWebSocketSubscription, func() any {
+		return environmentLogsPayload(environmentId, serviceIds, LogTime)
+	})
 
-			conn, err = resubscribeServiceLogsWithRetry(ctx, g, environmentId, serviceIds, conn)
-			if err != nil {
-				return err
-			}
+	defer func() { sub.Close() }()
 
-			continue
-		}
-
+	return sub.Run(ctx, func(payload []byte) error {
 		logs := &subscriptions.EnvironmentLogsData{}
-
-		if err := json.Unmarshal(logPayload, &logs); err != nil {
-			return fmt.Errorf("error unmarshalling service logs: %w", err)
+		if err := json.Unmarshal(payload, &logs); err != nil {
+			logger.Stdout.Error("failed to unmarshal service logs", logger.ErrAttr(err))
+			return nil
 		}
 
-		if logs.Type != subscriptions.SubscriptionTypeNext {
-			logger.Stdout.Debug("resubscribing", slog.String("reason", fmt.Sprintf("log type not next: %s", logs.Type)))
-
-			conn, err = resubscribeServiceLogsWithRetry(ctx, g, environmentId, serviceIds, conn)
-			if err != nil {
-				return err
-			}
-
-			continue
-		}
-
-		filteredLogs := []EnvironmentLogWithMetadata{}
+		filteredLogs := make([]EnvironmentLogWithMetadata, 0, len(logs.Payload.Data.EnvironmentLogs))
 
 		for i := range logs.Payload.Data.EnvironmentLogs {
 			// skip logs with empty messages and no attributes
@@ -133,56 +72,47 @@ func SubscribeToServiceLogs(ctx context.Context, g *railway.GraphQLClient, logTr
 				continue
 			}
 
-			// on first subscription skip logs if they where logged before the first subscription, on resubscription skip logs if they where already processed
-			if logs.Payload.Data.EnvironmentLogs[i].Timestamp.Before(LogTime) || LogTime == logs.Payload.Data.EnvironmentLogs[i].Timestamp {
-				// logger.Stdout.Debug("skipping stale log message")
+			// on first subscription skip logs if they were logged before the first subscription, on resubscription skip logs if they were already processed
+			if !logs.Payload.Data.EnvironmentLogs[i].Timestamp.After(LogTime) {
 				continue
 			}
 
 			LogTime = logs.Payload.Data.EnvironmentLogs[i].Timestamp
 
-			serviceName, ok := metadataMap[logs.Payload.Data.EnvironmentLogs[i].Tags.ServiceID]
-			if !ok {
-				logger.Stdout.Warn("service name could not be found")
-				serviceName = "undefined"
-			}
-
-			environmentName, ok := metadataMap[logs.Payload.Data.EnvironmentLogs[i].Tags.EnvironmentID]
-			if !ok {
-				logger.Stdout.Warn("environment name could not be found")
-				environmentName = "undefined"
-			}
-
-			projectName, ok := metadataMap[logs.Payload.Data.EnvironmentLogs[i].Tags.ProjectID]
-			if !ok {
-				logger.Stdout.Warn("project name could not be found")
-				projectName = "undefined"
-			}
+			serviceName := metadataName(metadataMap, logs.Payload.Data.EnvironmentLogs[i].Tags.ServiceID, "service")
+			environmentName := metadataName(metadataMap, logs.Payload.Data.EnvironmentLogs[i].Tags.EnvironmentID, "environment")
+			projectName := metadataName(metadataMap, logs.Payload.Data.EnvironmentLogs[i].Tags.ProjectID, "project")
 
 			filteredLogs = append(filteredLogs, EnvironmentLogWithMetadata{
 				Log: logs.Payload.Data.EnvironmentLogs[i],
 				Metadata: map[string]string{
-					"project_name": projectName,
-					"project_id":   logs.Payload.Data.EnvironmentLogs[i].Tags.ProjectID.String(),
+					subscribe.MetadataKeyProjectName: projectName,
+					subscribe.MetadataKeyProjectID:   logs.Payload.Data.EnvironmentLogs[i].Tags.ProjectID.String(),
 
-					"environment_name": environmentName,
-					"environment_id":   logs.Payload.Data.EnvironmentLogs[i].Tags.EnvironmentID.String(),
+					subscribe.MetadataKeyEnvironmentName: environmentName,
+					subscribe.MetadataKeyEnvironmentID:   logs.Payload.Data.EnvironmentLogs[i].Tags.EnvironmentID.String(),
 
-					"service_name": serviceName,
-					"service_id":   logs.Payload.Data.EnvironmentLogs[i].Tags.ServiceID.String(),
+					subscribe.MetadataKeyServiceName: serviceName,
+					subscribe.MetadataKeyServiceID:   logs.Payload.Data.EnvironmentLogs[i].Tags.ServiceID.String(),
 
-					"deployment_id":          logs.Payload.Data.EnvironmentLogs[i].Tags.DeploymentID.String(),
-					"deployment_instance_id": logs.Payload.Data.EnvironmentLogs[i].Tags.DeploymentInstanceID.String(),
+					subscribe.MetadataKeyDeploymentID:         logs.Payload.Data.EnvironmentLogs[i].Tags.DeploymentID.String(),
+					subscribe.MetadataKeyDeploymentInstanceID: logs.Payload.Data.EnvironmentLogs[i].Tags.DeploymentInstanceID.String(),
 
-					"log_type": "environment",
+					subscribe.MetadataKeyLogType: string(subscribe.LogTypeEnvironment),
 				},
 			})
 		}
 
 		if len(filteredLogs) == 0 {
-			continue
+			return nil
 		}
 
-		logTrack <- filteredLogs
-	}
+		select {
+		case logTrack <- filteredLogs:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		return nil
+	})
 }

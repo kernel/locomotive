@@ -28,7 +28,7 @@ func init() {
 
 	errors := []error{}
 
-	// Parse OTEL config first (uses OTEL_ prefix, not LOCOMOTIVE_)
+	// OTEL_* vars use their conventional names, so parse them without the LOCOMOTIVE_ prefix.
 	if err := env.Parse(&Otel); err != nil {
 		if er, ok := err.(env.AggregateError); ok {
 			errors = append(errors, er.Errors...)
@@ -40,10 +40,10 @@ func init() {
 	if err := env.ParseWithOptions(&Global, env.Options{
 		Prefix: "LOCOMOTIVE_",
 		FuncMap: map[reflect.Type]env.ParserFunc{
-			reflect.TypeOf(uuid.UUID{}): func(envVar string) (any, error) {
+			reflect.TypeFor[uuid.UUID](): func(envVar string) (any, error) {
 				return uuid.FromString(strings.TrimSpace(envVar))
 			},
-			reflect.TypeOf([]uuid.UUID{}): func(envVar string) (any, error) {
+			reflect.TypeFor[[]uuid.UUID](): func(envVar string) (any, error) {
 				envVarSplit := strings.Split(envVar, ",")
 
 				uuids := []uuid.UUID{}
@@ -65,13 +65,13 @@ func init() {
 
 				return uuids, nil
 			},
-			reflect.TypeOf(false): func(envVar string) (any, error) {
+			reflect.TypeFor[bool](): func(envVar string) (any, error) {
 				return strconv.ParseBool(strings.TrimSpace(envVar))
 			},
-			reflect.TypeOf(url.URL{}): func(envVar string) (any, error) {
+			reflect.TypeFor[url.URL](): func(envVar string) (any, error) {
 				envVarTrimmed := strings.TrimSpace(envVar)
 
-				// Allow empty URL when OTEL is enabled
+				// A webhook URL is optional when OTEL export is enabled.
 				if envVarTrimmed == "" {
 					return url.URL{}, nil
 				}
@@ -100,12 +100,6 @@ func init() {
 		errors = append(errors, fmt.Errorf("at least one of ENABLE_DEPLOY_LOGS or ENABLE_HTTP_LOGS must be true"))
 	}
 
-	// Validate that either OTEL is enabled or WebhookUrl is set
-	if !Otel.Enabled && Global.WebhookUrl.Host == "" && len(errors) == 0 {
-		errors = append(errors, fmt.Errorf("either OTEL_ENABLED=true or LOCOMOTIVE_WEBHOOK_URL must be set"))
-	}
-
-	// Validate required OTEL fields when OTEL is enabled
 	if Otel.Enabled {
 		if Otel.Endpoint == "" {
 			errors = append(errors, fmt.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT is required when OTEL_ENABLED=true"))
@@ -116,11 +110,18 @@ func init() {
 		if Otel.EnvironmentName == "" {
 			errors = append(errors, fmt.Errorf("OTEL_ENVIRONMENT_NAME is required when OTEL_ENABLED=true"))
 		}
+	} else if Global.WebhookUrl.Host == "" && len(errors) == 0 {
+		errors = append(errors, fmt.Errorf("either OTEL_ENABLED=true or LOCOMOTIVE_WEBHOOK_URL must be set"))
 	}
 
 	if len(errors) > 0 {
 		logger.Stderr.Error("error parsing environment variables", logger.ErrorsAttr(errors...))
 		os.Exit(1)
+	}
+
+	// The webhook mode/host/header checks only apply to the webhook path.
+	if Otel.Enabled {
+		return
 	}
 
 	Global.WebhookMode = WebhookMode(strings.ToLower(strings.TrimSpace(string(Global.WebhookMode))))
@@ -134,55 +135,50 @@ func init() {
 		slog.Any("configured_mode", Global.WebhookMode),
 		slog.String("webhook_host", Global.WebhookUrl.Hostname()),
 	}
+	hostMisconfigured := false
 
 	for mode, config := range WebhookModeToConfig {
 		if mode == Global.WebhookMode {
-			if !containsAnyHost(Global.WebhookUrl.Hostname(), config.ExpectedHostContains) {
+			if len(config.ExpectedHostContains) > 0 && !containsAnyHost(Global.WebhookUrl.Hostname(), config.ExpectedHostContains) {
 				hostAttrs = append(hostAttrs, slog.String("expected_host_contains", strings.Join(config.ExpectedHostContains, " OR ")))
+				hostMisconfigured = true
 			}
 		} else {
 			if len(config.ExpectedHostContains) > 0 && containsAnyHost(Global.WebhookUrl.Hostname(), config.ExpectedHostContains) {
 				hostAttrs = append(hostAttrs, slog.Any("suggested_mode", mode))
+				hostMisconfigured = true
 				break
 			}
 		}
 	}
 
-	// Warn if we added any validation attributes beyond the basic ones
-	if len(hostAttrs) > 2 {
+	if hostMisconfigured {
 		logger.Stderr.Warn("possible webhook misconfiguration", hostAttrs...)
 	}
 
-	// Header validation with separate attributes and logging
 	headerAttrs := []any{
 		slog.Any("configured_mode", Global.WebhookMode),
 		slog.Any("configured_headers", Global.AdditionalHeaders.Keys()),
 	}
+	headerMisconfigured := false
 
 	if len(WebhookModeToConfig[Global.WebhookMode].ExpectedHeaders) > 0 {
 		missingHeaders := []string{}
 
 		for _, expectedHeader := range WebhookModeToConfig[Global.WebhookMode].ExpectedHeaders {
-			if !func(expectedHeader string) bool {
-				for configuredHeader := range Global.AdditionalHeaders {
-					if strings.EqualFold(configuredHeader, expectedHeader) {
-						return true
-					}
-				}
-
-				return false
-			}(expectedHeader) {
+			if !headersContainFold(Global.AdditionalHeaders, expectedHeader) {
 				missingHeaders = append(missingHeaders, expectedHeader)
 			}
 		}
 
 		if len(missingHeaders) > 0 {
 			headerAttrs = append(headerAttrs, slog.Any("missing_headers", missingHeaders))
+			headerMisconfigured = true
 		}
 	}
 
-	// Warn if we added any header validation attributes beyond the basic ones
-	if len(headerAttrs) > 2 && len(hostAttrs) <= 2 {
+	// Only warn about headers when the host looked fine, to avoid a double warning.
+	if headerMisconfigured && !hostMisconfigured {
 		logger.Stderr.Warn("possible webhook header misconfiguration", headerAttrs...)
 	}
 }

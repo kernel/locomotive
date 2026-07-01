@@ -11,19 +11,19 @@ var client *http.Client
 
 func init() {
 	client = &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
 				Timeout:   5 * time.Second,
 				KeepAlive: 5 * time.Minute,
 			}).DialContext,
-			MaxConnsPerHost:       100,
-			MaxIdleConns:          100,
+			MaxConnsPerHost:       10,
+			MaxIdleConns:          10,
 			IdleConnTimeout:       5 * time.Minute,
-			TLSHandshakeTimeout:   5 * time.Second,
-			ResponseHeaderTimeout: 5 * time.Second,
-			ExpectContinueTimeout: 5 * time.Second,
-			MaxIdleConnsPerHost:   100,
+			TLSHandshakeTimeout:   20 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+			ExpectContinueTimeout: 20 * time.Second,
+			MaxIdleConnsPerHost:   10,
 			DisableKeepAlives:     false,
 			TLSClientConfig:       &tls.Config{},
 		},

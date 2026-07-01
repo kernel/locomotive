@@ -1,0 +1,67 @@
+name: Docker Build
+
+on:
+  workflow_call:
+    inputs:
+      push:
+        type: boolean
+        default: false
+      image:
+        type: string
+        default: ''
+
+jobs:
+  build:
+    name: Docker Build (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log into ghcr.io
+        if: inputs.push
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,scope=${{ matrix.platform }},mode=max
+          outputs: ${{ inputs.push && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', inputs.image) || '' }}
+
+      - name: Export digest
+        if: inputs.push
+        id: digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+          slug="${{ matrix.platform }}"
+          echo "slug=${slug//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload digest
+        if: inputs.push
+        uses: actions/upload-artifact@v7
+        with:
+          name: digest-${{ steps.digest.outputs.slug }}
+          path: /tmp/digests/*
+          if-no-files-found: error

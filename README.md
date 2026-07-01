@@ -12,7 +12,9 @@ With tailored support for:
 - Loki
 - Sentry
 - Papertrail
-- **OpenTelemetry (OTLP)** - Send logs directly to any OTLP-compatible collector
+- SigNoz
+- VictoriaLogs
+- OpenTelemetry HTTP
 
 And more with the standard JSON and JSON Lines modes.
 
@@ -29,6 +31,8 @@ Configuration is done through environment variables. See explanation and example
 - Metadata is gathered on startup and then approximately every 10 to 20 minutes. If a project, service, or environment name has changed, the name in the metadata will not be correct until the locomotive refreshes its metadata.
 
 - The root attributes in the HTTP logs are subject to change as Railway adds or removes attributes.
+
+- HTTP logs are only collected for services that have a domain — a service with no domain receives no HTTP traffic, so it produces no HTTP logs. If a domain is added to a service that is already running, locomotive starts collecting its HTTP logs after the service's next deployment (or any other environment change), or after a locomotive restart. Newly deployed services are picked up automatically, since deploying is itself an environment change.
 
 ### All variables:
 
@@ -74,11 +78,14 @@ Configuration is done through environment variables. See explanation and example
 
 - `LOCOMOTIVE_WEBHOOK_URL` - The URL to send the webhook to.
 
-    **Required** (unless using OTEL mode).
+    **Required** (unless `OTEL_ENABLED=true`, see [OTLP gRPC mode](#otlp-grpc-mode-variables)).
 
     - Example for Datadog: `https://http-intake.logs.datadoghq.com/api/v2/logs`
-    - Example for Axiom: `https://api.axiom.co/v1/datasets/<DATASET_NAME>/ingest`
+    - Example for Axiom: `https://api.axiom.co/v1/datasets/{DATASET_NAME}/ingest`
     - Example for BetterStack: `https://in.logs.betterstack.com`
+    - Example for SigNoz: `https://ingest.{REGION}.signoz.cloud:443/v1/logs`
+    - Example for VictoriaLogs: `https://{VICTORIALOGS_HOSTNAME}/insert/jsonline`
+    - Example for OpenTelemetry HTTP: `https://{OTEL_HTTP_ENDPOINT}/v1/logs`
 
     See [Provider specific setup](#provider-specific-setup) for more information.
 
@@ -90,8 +97,8 @@ Configuration is done through environment variables. See explanation and example
 
     - Useful for authentication. The string is in the format of a cookie, meaning each key-value pair is separated by a semicolon, and each key and value are separated by an equals sign.
 
-    - Example for Datadog: `ADDITIONAL_HEADERS=DD-API-KEY=<DD_API_KEY>;DD-APPLICATION-KEY=<DD_APP_KEY>`
-    - Example for Axiom/BetterStack: `ADDITIONAL_HEADERS=Authorization=Bearer <API_TOKEN>`
+    - Example for Datadog: `ADDITIONAL_HEADERS=DD-API-KEY={DD_API_KEY};DD-APPLICATION-KEY={DD_APP_KEY}`
+    - Example for Axiom/BetterStack: `ADDITIONAL_HEADERS=Authorization=Bearer {API_TOKEN}`
 
     See [Provider specific setup](#provider-specific-setup) for more information.
 
@@ -113,6 +120,9 @@ Configuration is done through environment variables. See explanation and example
     - `betterstack`
     - `loki`
     - `sentry`
+    - `signoz`
+    - `victorialogs`
+    - `otel_http`
 
     </br>
 
@@ -142,42 +152,41 @@ Configuration is done through environment variables. See explanation and example
 
     </br>
 
-### OTEL Mode Variables
+### OTLP gRPC mode variables
 
-When `OTEL_ENABLED=true`, logs are sent via OTLP gRPC instead of HTTP webhooks. This is useful for sending logs to OpenTelemetry collectors like the [OpenTelemetry Collector](https://opentelemetry.io/docs/collector/), [SigNoz](https://signoz.io/), [Grafana Alloy](https://grafana.com/docs/alloy/), or any other OTLP-compatible backend.
+When `OTEL_ENABLED=true`, logs are exported directly over **OTLP gRPC** (via the OpenTelemetry SDK) instead of being serialized and POSTed to `LOCOMOTIVE_WEBHOOK_URL`. This is distinct from the `otel_http` webhook mode above: it uses gRPC, holds a persistent export connection, and sets `service.name` from `OTEL_SERVICE_NAME` rather than from the Railway service name. These variables use the conventional `OTEL_` names (no `LOCOMOTIVE_` prefix).
 
-- `OTEL_ENABLED` - Enable OTEL mode.
+- `OTEL_ENABLED` - Enable OTLP gRPC export.
 
-    **Optional**.
-
-    - Default: `false`
-    - When `true`, logs are sent via OTLP gRPC instead of HTTP webhooks.
-    - When `true`, `LOCOMOTIVE_WEBHOOK_URL` is not required.
+    **Optional**. Default: `false`. When `true`, `LOCOMOTIVE_WEBHOOK_URL` and `LOCOMOTIVE_WEBHOOK_MODE` are ignored.
 
     </br>
 
-- `OTEL_EXPORTER_OTLP_ENDPOINT` - The OTLP gRPC endpoint to send logs to.
+- `OTEL_EXPORTER_OTLP_ENDPOINT` - The OTLP gRPC endpoint to export logs to.
 
     **Required when `OTEL_ENABLED=true`**.
 
     - Example: `otel-collector.railway.internal:4317`
-    - Example: `localhost:4317`
 
     </br>
 
-- `OTEL_SERVICE_NAME` - The service name to use for logs.
+- `OTEL_SERVICE_NAME` - Value of the `service.name` resource attribute on every exported log.
 
     **Required when `OTEL_ENABLED=true`**.
-
-    - This is added as the `service.name` resource attribute.
 
     </br>
 
-- `OTEL_ENVIRONMENT_NAME` - The environment name to use for logs.
+- `OTEL_ENVIRONMENT_NAME` - Value of the `deployment.environment.name` resource attribute.
 
     **Required when `OTEL_ENABLED=true`**.
 
-    - This is added as the `deployment.environment.name` resource attribute.
+    </br>
+
+    **Notes:**
+
+    - Logs are exported using insecure gRPC (no TLS), appropriate for internal Railway networking.
+    - HTTP log severity is derived from the status code: 5xx → ERROR, 4xx → WARN, otherwise INFO.
+    - Railway metadata is attached as log attributes under the `railway.*` prefix.
 
     </br>
 
@@ -186,10 +195,10 @@ When `OTEL_ENABLED=true`, logs are sent via OTLP gRPC instead of HTTP webhooks. 
 #### Papertrail
 
 - `LOCOMOTIVE_WEBHOOK_MODE` - `papertrail`
-- `LOCOMOTIVE_WEBHOOK_URL` - `https://<PAPERTRAIL_HOSTNAME>/v1/logs/bulk`
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://{PAPERTRAIL_HOSTNAME}/v1/logs/bulk`
 
     The hostname can be found by adding a new destination and then opening the usage instructions.
-- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `Authorization=Bearer <PAPERTRAIL_TOKEN>`
+- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `Authorization=Bearer {PAPERTRAIL_TOKEN}`
 
     The token can be found by adding a new destination and then opening the usage instructions.
 
@@ -201,7 +210,7 @@ When `OTEL_ENABLED=true`, logs are sent via OTLP gRPC instead of HTTP webhooks. 
 
 - `LOCOMOTIVE_WEBHOOK_URL` - `https://http-intake.logs.datadoghq.com/api/v2/logs`
 
-- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `DD-API-KEY=<DD_API_KEY>;DD-APPLICATION-KEY=<DD_APP_KEY>`
+- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `DD-API-KEY={DD_API_KEY};DD-APPLICATION-KEY={DD_APP_KEY}`
 
     </br>
 
@@ -209,11 +218,11 @@ When `OTEL_ENABLED=true`, logs are sent via OTLP gRPC instead of HTTP webhooks. 
 
 - `LOCOMOTIVE_WEBHOOK_MODE` - `axiom`
 
-- `LOCOMOTIVE_WEBHOOK_URL` - `https://api.axiom.co/v1/datasets/<DATASET_NAME>/ingest`
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://api.axiom.co/v1/datasets/{DATASET_NAME}/ingest`
 
     The dataset name can be found under the 'Datasets' tab in the Axiom UI.
 
-- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `Authorization=Bearer <API_TOKEN>`
+- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `Authorization=Bearer {API_TOKEN}`
 
     The API token can be generated from within your account settings under the 'API Tokens' tab.
 
@@ -223,13 +232,13 @@ When `OTEL_ENABLED=true`, logs are sent via OTLP gRPC instead of HTTP webhooks. 
 
 - `LOCOMOTIVE_WEBHOOK_MODE` - `betterstack`
 
-- `LOCOMOTIVE_WEBHOOK_URL` - `https://<BETTERSTACK_HOSTNAME>`
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://{BETTERSTACK_HOSTNAME}`
 
     The hostname is generated when connecting a new source; choose HTTP.
 
     You can also find the hostname in the source configuration.
 
-- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `Authorization=Bearer <TOKEN>`
+- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `Authorization=Bearer {TOKEN}`
 
     The token is generated when connecting a new source; choose HTTP.
 
@@ -241,13 +250,13 @@ When `OTEL_ENABLED=true`, logs are sent via OTLP gRPC instead of HTTP webhooks. 
 
 - `LOCOMOTIVE_WEBHOOK_MODE` - `loki`
 
-- `LOCOMOTIVE_WEBHOOK_URL` - `https://<LOKI_HOSTNAME>/loki/api/v1/push`
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://{LOKI_HOSTNAME}/loki/api/v1/push`
 
     The hostname would depend on where you are running Loki.
 
     Or, with username and password authentication:
 
-    `https://<USERNAME>:<PASSWORD>@<LOKI_HOSTNAME>/loki/api/v1/push`
+    `https://{USERNAME}:{PASSWORD}@{LOKI_HOSTNAME}/loki/api/v1/push`
 
     </br>
 
@@ -255,41 +264,57 @@ When `OTEL_ENABLED=true`, logs are sent via OTLP gRPC instead of HTTP webhooks. 
 
 - `LOCOMOTIVE_WEBHOOK_MODE` - `sentry`
 
-- `LOCOMOTIVE_WEBHOOK_URL` - `https://<SENTRY_HOSTNAME>/api/<SENTRY_PROJECT_ID>/envelope/`
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://{SENTRY_HOSTNAME}/api/{SENTRY_PROJECT_ID}/envelope/`
 
     The hostname can be found in the 'Client Keys (DSN)' section of the Sentry project settings; it will be the hostname of the given DSN.
 
     The project ID can be also be found in the 'Client Keys (DSN)' section of the Sentry project settings, it will be the path in the URL of the given DSN.
 
-- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `X-Sentry-Auth=Sentry sentry_key=<SENTRY_KEY>`
+- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `X-Sentry-Auth=Sentry sentry_key={SENTRY_KEY}`
 
     The key can again be found in the 'Client Keys (DSN)' section of the Sentry project settings; it will be the user part of the given DSN.
 
     </br>
 
-#### OpenTelemetry (OTLP)
+#### SigNoz
 
-OTEL mode sends logs directly via OTLP gRPC, bypassing the webhook system entirely. This is ideal for sending logs to OpenTelemetry-compatible backends.
+> [!NOTE]
+> The `signoz` mode targets **SigNoz Cloud** only. For self-hosted SigNoz, use the [`otel_http`](#opentelemetry-http) mode with your OTel Collector URL (e.g. `http://{SIGNOZ_HOSTNAME}:4318/v1/logs`).
 
-- `OTEL_ENABLED` - `true`
+- `LOCOMOTIVE_WEBHOOK_MODE` - `signoz`
 
-- `OTEL_EXPORTER_OTLP_ENDPOINT` - The gRPC endpoint of your OTLP collector.
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://ingest.{REGION}.signoz.cloud:443/v1/logs`
 
-    Example: `otel-collector.railway.internal:4317`
+    Replace `{REGION}` with your SigNoz Cloud region (e.g. `us`, `in`, `eu`).
 
-- `OTEL_SERVICE_NAME` - The service name for your logs.
+- `LOCOMOTIVE_ADDITIONAL_HEADERS` - `signoz-ingestion-key={SIGNOZ_INGESTION_KEY}`
 
-    Example: `my-railway-app`
-
-- `OTEL_ENVIRONMENT_NAME` - The deployment environment.
-
-    Example: `production`
-
-**Notes:**
-
-- Logs are sent using insecure gRPC (no TLS), which is appropriate for internal Railway networking.
-- HTTP log severity is automatically set based on status code: 5XX → ERROR, 4XX → WARN, others → INFO.
-- Railway metadata is added as log attributes with the `railway.*` prefix.
+    The ingestion URL and key can be found in your SigNoz Cloud dashboard under 'Settings' > 'Ingestion Settings'. See the [SigNoz Cloud Ingestion docs](https://signoz.io/docs/ingestion/signoz-cloud/overview/) for more information.
 
     </br>
 
+#### VictoriaLogs
+
+- `LOCOMOTIVE_WEBHOOK_MODE` - `victorialogs`
+
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://{VICTORIALOGS_HOSTNAME}/insert/jsonline`
+
+    The hostname depends on where you are running VictoriaLogs. The endpoint accepts JSON-line ingestion at `/insert/jsonline`. See the [VictoriaLogs JSON ingestion docs](https://docs.victoriametrics.com/victorialogs/data-ingestion/#json-stream-api) for details.
+
+    Use the `_stream_fields` query parameter to declare which fields identify a log stream (e.g. service / environment), for example:
+
+    `https://{VICTORIALOGS_HOSTNAME}/insert/jsonline?_stream_fields=_metadata.service_name,_metadata.environment_name`
+
+    Or, with username and password authentication:
+
+    `https://{USERNAME}:{PASSWORD}@{VICTORIALOGS_HOSTNAME}/insert/jsonline`
+
+    </br>
+
+#### OpenTelemetry HTTP
+
+- `LOCOMOTIVE_WEBHOOK_MODE` - `otel_http`
+
+- `LOCOMOTIVE_WEBHOOK_URL` - `https://{OTEL_COLLECTOR_HOSTNAME}/v1/logs`
+
+    The hostname would depend on where you are running your OpenTelemetry Collector. Remember to also add the port if necessary, likely `4318`.

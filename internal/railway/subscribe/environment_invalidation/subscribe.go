@@ -3,126 +3,59 @@ package environment_invalidation
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"log/slog"
-	"time"
 
 	"github.com/brody192/locomotive/internal/logger"
 	"github.com/brody192/locomotive/internal/railway"
 	"github.com/brody192/locomotive/internal/railway/gql/subscriptions"
 	"github.com/brody192/locomotive/internal/railway/subscribe"
-	"github.com/coder/websocket"
 	"github.com/flexstack/uuid"
 )
 
-func createInvalidationRequestSubscription(ctx context.Context, g *railway.GraphQLClient, environmentId uuid.UUID) (*websocket.Conn, error) {
-	payload := &subscriptions.CanvasInvalidationSubscriptionPayload{
+func invalidationRequestPayload(environmentId uuid.UUID) *subscriptions.CanvasInvalidationSubscriptionPayload {
+	return &subscriptions.CanvasInvalidationSubscriptionPayload{
 		Query: subscriptions.CanvasInvalidationSubscription,
 		Variables: &subscriptions.CanvasInvalidationSubscriptionVariables{
 			EnvironmentId: environmentId,
 		},
 	}
-
-	return g.CreateWebSocketSubscription(ctx, payload)
-}
-
-// resubscribeWithRetry handles reconnection logic with retries and proper context cancellation
-func resubscribeWithRetry(ctx context.Context, g *railway.GraphQLClient, environmentId uuid.UUID, conn *websocket.Conn) (*websocket.Conn, error) {
-	subscribe.SafeConnCloseNow(conn)
-
-	// Track total retry time with a maximum of 3600 seconds (1 hour)
-	maxRetryDuration := 3600 * time.Second
-	retryStart := time.Now()
-
-	// Try to resubscribe with retry loop
-	for {
-		// Check if we've exceeded the maximum retry duration
-		if time.Since(retryStart) > maxRetryDuration {
-			return nil, fmt.Errorf("failed to resubscribe after %v: maximum retry duration exceeded", maxRetryDuration)
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
-			newConn, err := createInvalidationRequestSubscription(ctx, g, environmentId)
-			if err != nil {
-				logger.Stdout.Debug("error resubscribing, will retry in 1 second", logger.ErrAttr(err))
-
-				// Sleep with context cancellation awareness
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(1 * time.Second):
-					continue
-				}
-			}
-
-			// Successfully resubscribed
-			return newConn, nil
-		}
-	}
 }
 
 func SubscribeToInvalidationRequests(ctx context.Context, g *railway.GraphQLClient, environmentHashTrack chan<- string, environmentId uuid.UUID) error {
-	conn, err := createInvalidationRequestSubscription(ctx, g, environmentId)
-	if err != nil {
-		return err
-	}
+	sub := subscribe.NewSubscription(subscribe.LogTypeEnvironmentInvalidation, g.CreateWebSocketSubscription, func() any {
+		return invalidationRequestPayload(environmentId)
+	})
 
-	defer conn.CloseNow()
+	defer func() { sub.Close() }()
 
 	lastHash := ""
 
-	for {
-		_, payload, err := subscribe.SafeConnRead(conn, ctx)
-		if err != nil {
-			logger.Stdout.Debug("resubscribing",
-				slog.String("from", "SubscribeToInvalidationRequests_SafeConnRead"),
-				logger.ErrAttr(err),
-			)
-
-			conn, err = resubscribeWithRetry(ctx, g, environmentId, conn)
-			if err != nil {
-				return err
-			}
-
-			continue
-		}
-
+	return sub.Run(ctx, func(payload []byte) error {
 		invalidationRequest := &subscriptions.CanvasInvalidationData{}
-
 		if err := json.Unmarshal(payload, &invalidationRequest); err != nil {
-			return fmt.Errorf("error unmarshalling invalidation request: %w", err)
+			logger.Stdout.Error("failed to unmarshal invalidation request", logger.ErrAttr(err))
+			return nil
 		}
 
-		if invalidationRequest.Type != subscriptions.SubscriptionTypeNext || invalidationRequest.Type == subscriptions.SubscriptionTypeComplete {
-			logger.Stdout.Debug("resubscribing",
-				slog.String("from", "SubscribeToInvalidationRequests_TypeNotNext"),
-				logger.ErrAttr(fmt.Errorf("log type not next: %s", invalidationRequest.Type)),
-			)
+		id := invalidationRequest.Payload.Data.CanvasInvalidation.ID
 
-			conn, err = resubscribeWithRetry(ctx, g, environmentId, conn)
-			if err != nil {
-				return err
-			}
-
-			continue
-		}
-
+		// First message just seeds the baseline; only forward subsequent changes.
 		if lastHash == "" {
-			// logger.Stdout.Debug("skipping because last hash is empty", slog.String("id", invalidationRequest.Payload.Data.CanvasInvalidation.ID))
-			lastHash = invalidationRequest.Payload.Data.CanvasInvalidation.ID
-			continue
+			lastHash = id
+			return nil
 		}
 
-		if invalidationRequest.Payload.Data.CanvasInvalidation.ID == lastHash {
-			// logger.Stdout.Debug("skipping because last hash is the same", slog.String("id", invalidationRequest.Payload.Data.CanvasInvalidation.ID))
-			continue
+		if id == lastHash {
+			return nil
 		}
 
-		lastHash = invalidationRequest.Payload.Data.CanvasInvalidation.ID
+		lastHash = id
 
-		environmentHashTrack <- invalidationRequest.Payload.Data.CanvasInvalidation.ID
-	}
+		select {
+		case environmentHashTrack <- id:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		return nil
+	})
 }

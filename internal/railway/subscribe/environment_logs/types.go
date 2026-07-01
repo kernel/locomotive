@@ -9,3 +9,7 @@ type EnvironmentLogWithMetadata struct {
 	Log      subscriptions.EnvironmentLog
 	Metadata EnvironmentLogMetadata
 }
+
+func (e EnvironmentLogWithMetadata) GetMetadata() map[string]string {
+	return e.Metadata
+}

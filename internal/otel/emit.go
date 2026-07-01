@@ -10,8 +10,8 @@ import (
 	"github.com/brody192/locomotive/internal/railway/subscribe/environment_logs"
 	"github.com/brody192/locomotive/internal/railway/subscribe/http_logs"
 	"github.com/brody192/locomotive/internal/util"
-	otellog "go.opentelemetry.io/otel/log"
 	"github.com/tidwall/gjson"
+	otellog "go.opentelemetry.io/otel/log"
 )
 
 // EmitEnvironmentLogs sends environment/deploy logs via OTLP.
@@ -115,16 +115,15 @@ func transformHttpLog(l http_logs.DeploymentHttpLogWithMetadata) otellog.Record 
 	attrs = append(attrs, otellog.String("http.path", l.Path))
 
 	// Parse the raw log JSON and extract fields
-	logStr := string(l.Log)
-	result := gjson.Parse(logStr)
-	
+	result := gjson.ParseBytes(l.Log)
+
 	result.ForEach(func(key, value gjson.Result) bool {
 		k := key.String()
 		// Skip fields we've already handled
 		if k == "path" || k == "httpStatus" || k == "_metadata" {
 			return true
 		}
-		
+
 		switch value.Type {
 		case gjson.String:
 			attrs = append(attrs, otellog.String(k, value.String()))

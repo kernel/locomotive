@@ -1,0 +1,16 @@
+name: Build
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: "!contains(github.event.pull_request.labels.*.name, 'beta')"
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      push: false

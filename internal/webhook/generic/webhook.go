@@ -2,15 +2,15 @@ package generic
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 
 	"github.com/brody192/locomotive/internal/config"
-	"github.com/brody192/locomotive/internal/railway/subscribe/environment_logs"
-	"github.com/brody192/locomotive/internal/railway/subscribe/http_logs"
 )
 
 var acceptedStatusCodes = []int{
@@ -20,26 +20,10 @@ var acceptedStatusCodes = []int{
 	http.StatusCreated,
 }
 
-func SendWebhookForDeployLogs(logs []environment_logs.EnvironmentLogWithMetadata, client *http.Client) (serializedLogs []byte, err error) {
-	payload, err := config.WebhookModeToConfig[config.Global.WebhookMode].EnvironmentLogReconstructorFunc(logs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to reconstruct deploy log lines: %w", err)
-	}
+const maxErrorBodySize = 8192
 
-	return payload, sendRawWebhook(payload, config.Global.WebhookUrl, config.Global.AdditionalHeaders, client)
-}
-
-func SendWebhookForHttpLogs(logs []http_logs.DeploymentHttpLogWithMetadata, client *http.Client) (serializedLogs []byte, err error) {
-	payload, err := config.WebhookModeToConfig[config.Global.WebhookMode].HTTPLogReconstructorFunc(logs)
-	if err != nil {
-		return nil, fmt.Errorf("failed to reconstruct http log lines: %w", err)
-	}
-
-	return payload, sendRawWebhook(payload, config.Global.WebhookUrl, config.Global.AdditionalHeaders, client)
-}
-
-func sendRawWebhook(logs []byte, url url.URL, additionalHeaders config.AdditionalHeaders, client *http.Client) error {
-	req, err := http.NewRequest(http.MethodPost, url.String(), bytes.NewReader(logs))
+func SendRawWebhook(ctx context.Context, logs []byte, url url.URL, defaultHeaders map[string]string, additionalHeaders config.AdditionalHeaders, client *http.Client) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url.String(), bytes.NewReader(logs))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -48,7 +32,7 @@ func sendRawWebhook(logs []byte, url url.URL, additionalHeaders config.Additiona
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Keep-Alive", "timeout=5, max=1000")
 
-	for key, value := range config.WebhookModeToConfig[config.Global.WebhookMode].Headers {
+	for key, value := range defaultHeaders {
 		req.Header.Set(key, value)
 	}
 
@@ -64,13 +48,17 @@ func sendRawWebhook(logs []byte, url url.URL, additionalHeaders config.Additiona
 	defer res.Body.Close()
 
 	if !slices.Contains(acceptedStatusCodes, res.StatusCode) {
-		body, err := io.ReadAll(res.Body)
-		if err != nil {
+		body, err := io.ReadAll(io.LimitReader(res.Body, maxErrorBodySize))
+		io.Copy(io.Discard, res.Body)
+		bodyStr := strings.TrimSpace(string(body))
+		if err != nil || len(bodyStr) == 0 {
 			return fmt.Errorf("non success status code: %d", res.StatusCode)
 		}
 
-		return fmt.Errorf("non success status code: %d; with body: %s", res.StatusCode, body)
+		return fmt.Errorf("non success status code: %d; with body: %s", res.StatusCode, bodyStr)
 	}
+
+	io.Copy(io.Discard, res.Body)
 
 	return nil
 }
